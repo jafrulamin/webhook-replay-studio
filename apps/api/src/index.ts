@@ -1,5 +1,7 @@
 import { Hono } from "hono";
 import { makeId } from "./utils/ids";
+import { inboundRoute } from "./routes/inboud";
+import { eventsRoute } from "./routes/events";
 
 type Bindings = {
   DB: D1Database;
@@ -15,11 +17,9 @@ app.onError((err, c) => {
 
 function applyCors(c: any) {
   const allowed = c.env.APP_ORIGIN;
-
-  if (typeof allowed === "string" && allowed.length > 0) {
-    c.header("Access-Control-Allow-Origin", allowed);
-  }
-
+  const origin = typeof allowed === "string" && allowed.length > 0 ? allowed : "http://localhost:5173";
+  
+  c.header("Access-Control-Allow-Origin", origin);
   c.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   c.header("Access-Control-Allow-Headers", "content-type");
 }
@@ -71,14 +71,6 @@ app.post("/api/inboxes", async (c) => {
   const id = makeId("ibx");
   const createdAt = Date.now();
 
-  if (!c.env || !c.env.DB) {
-    let envKeys: string[] = [];
-    if (c.env) {
-      envKeys = Object.keys(c.env);
-    }
-    return c.json({ error: "Database binding not available", envKeys: envKeys }, 500);
-  }
-
   await c.env.DB.prepare(
     "INSERT INTO inboxes (id, name, created_at) VALUES (?, ?, ?)"
   )
@@ -101,14 +93,6 @@ app.post("/api/inboxes", async (c) => {
 });
 
 app.get("/api/inboxes", async (c) => {
-  if (!c.env || !c.env.DB) {
-    let envKeys: string[] = [];
-    if (c.env) {
-      envKeys = Object.keys(c.env);
-    }
-    return c.json({ error: "Database binding not available", envKeys: envKeys }, 500);
-  }
-
   const result = await c.env.DB.prepare(
     "SELECT id, name, created_at FROM inboxes ORDER BY created_at DESC LIMIT 50"
   ).all();
@@ -132,5 +116,8 @@ app.get("/api/inboxes", async (c) => {
 
   return c.json({ inboxes: inboxes });
 });
+
+app.route("/", inboundRoute);
+app.route("/", eventsRoute);
 
 export default app;
