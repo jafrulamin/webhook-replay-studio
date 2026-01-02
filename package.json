@@ -1,0 +1,5 @@
+{
+  "name": "webhook-replay-studio",
+  "private": true,
+  "workspaces": ["apps/*"]
+}
