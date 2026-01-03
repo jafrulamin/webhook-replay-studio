@@ -1081,4 +1081,130 @@ app.post("/api/replay-jobs/:jobId/run", async (c) => {
   return c.json({ ok: true, status: finalStatus, lastError: lastError });
 });
 
+app.get("/api/replay-jobs/:jobId/compare", async (c) => {
+  const jobId = c.req.param("jobId");
+
+  const jobRow = await c.env.DB.prepare(
+    "SELECT id, event_id FROM replay_jobs WHERE id = ? LIMIT 1"
+  )
+    .bind(jobId)
+    .first();
+
+  if (!jobRow) {
+    return c.json({ ok: false, error: "job_not_found" }, 404);
+  }
+
+  const eventId = String((jobRow as any).event_id);
+
+  const ev = await c.env.DB.prepare(
+    "SELECT id, method, headers_json, body_text, body_json, path FROM events WHERE id = ? LIMIT 1"
+  )
+    .bind(eventId)
+    .first();
+
+  if (!ev) {
+    return c.json({ ok: false, error: "event_not_found" }, 404);
+  }
+
+  const attempt = await c.env.DB.prepare(
+    "SELECT id, attempt_no, request_headers_json, request_body_text, response_status, success FROM replay_attempts WHERE job_id = ? ORDER BY attempt_no DESC LIMIT 1"
+  )
+    .bind(jobId)
+    .first();
+
+  if (!attempt) {
+    return c.json({ ok: false, error: "no_attempts" }, 400);
+  }
+
+  // Original headers
+  const origHeadersParsed = parseJsonSafeText(String((ev as any).headers_json));
+  let origHeaders: any = {};
+  if (origHeadersParsed !== null) {
+    origHeaders = origHeadersParsed;
+  }
+
+  // Replay headers (what we actually sent)
+  const sentHeadersParsed = parseJsonSafeText(String((attempt as any).request_headers_json));
+  let sentHeaders: any = {};
+  if (sentHeadersParsed !== null) {
+    sentHeaders = sentHeadersParsed;
+  }
+
+  const headersDiff = diffHeaders(origHeaders, sentHeaders);
+
+  // Original body
+  let origBodyRaw = "";
+  let origBodyJson: any = null;
+  let origIsJson = false;
+
+  const evBodyJsonText = (ev as any).body_json;
+  if (typeof evBodyJsonText === "string" && evBodyJsonText.length > 0) {
+    const parsed = parseJsonSafeText(evBodyJsonText);
+    if (parsed !== null) {
+      origIsJson = true;
+      origBodyJson = parsed;
+      origBodyRaw = JSON.stringify(parsed, null, 2);
+    }
+  }
+
+  if (!origIsJson) {
+    const t = (ev as any).body_text;
+    if (typeof t === "string") origBodyRaw = t;
+  }
+
+  // Replay body
+  let sentBodyRaw = "";
+  let sentBodyJson: any = null;
+  let sentIsJson = false;
+
+  const sentText = (attempt as any).request_body_text;
+  if (typeof sentText === "string") {
+    sentBodyRaw = sentText;
+
+    const parsed = parseJsonSafeText(sentText);
+    if (parsed !== null) {
+      sentIsJson = true;
+      sentBodyJson = parsed;
+      sentBodyRaw = JSON.stringify(parsed, null, 2);
+    }
+  }
+
+  // JSON diff if both are JSON
+  let jsonDiff: any = { added: [], removed: [], changed: [] };
+  if (origIsJson && sentIsJson) {
+    jsonDiff = diffJson(origBodyJson, sentBodyJson);
+  }
+
+  return c.json({
+    ok: true,
+    jobId: jobId,
+    attempt: {
+      id: (attempt as any).id,
+      attemptNo: (attempt as any).attempt_no,
+      responseStatus: (attempt as any).response_status,
+      success: (attempt as any).success === 1
+    },
+    original: {
+      method: (ev as any).method,
+      path: (ev as any).path,
+      headers: origHeaders,
+      body: {
+        isJson: origIsJson,
+        raw: origBodyRaw
+      }
+    },
+    replay: {
+      headers: sentHeaders,
+      body: {
+        isJson: sentIsJson,
+        raw: sentBodyRaw
+      }
+    },
+    diff: {
+      headers: headersDiff,
+      json: jsonDiff
+    }
+  });
+});
+
 export default app;

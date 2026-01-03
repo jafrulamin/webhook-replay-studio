@@ -67,6 +67,7 @@ export default function App() {
   const [destUrl, setDestUrl] = useState("https://httpbin.org/post");
   const [jobId, setJobId] = useState("");
   const [jobInfo, setJobInfo] = useState<any>(null);
+  const [compareData, setCompareData] = useState<any>(null);
 
   async function fetchWithTimeout(url: string, options: any, timeoutMs: number) {
     const controller = new AbortController();
@@ -151,6 +152,7 @@ export default function App() {
     setCopyMsg("");
 
     setPreviewData(null);
+    setCompareData(null);
 
     setJobId("");
     setJobInfo(null);
@@ -199,6 +201,7 @@ export default function App() {
     setDestUrl("https://httpbin.org/post");
     setJobId("");
     setJobInfo(null);
+    setCompareData(null);
 
     try {
       const res = await fetchWithTimeout(
@@ -477,6 +480,27 @@ export default function App() {
     }
   }
 
+  async function loadCompare(id: string) {
+    setErr("");
+    setBusy(true);
+    setCompareData(null);
+
+    try {
+      const res = await fetchWithTimeout(API_BASE + "/api/replay-jobs/" + id + "/compare", null, 8000);
+      if (!res.ok) {
+        const t = await res.text();
+        setErr("Compare failed: " + t);
+        return;
+      }
+      const data = await res.json();
+      setCompareData(data);
+    } catch {
+      setErr("Network error loading compare view");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function goBack() {
     setErr("");
     setCopyMsg("");
@@ -489,6 +513,7 @@ export default function App() {
       setSafeData(null);
 
       setPreviewData(null);
+      setCompareData(null);
 
       setJobId("");
       setJobInfo(null);
@@ -505,6 +530,7 @@ export default function App() {
       setSafeData(null);
 
       setPreviewData(null);
+      setCompareData(null);
 
       setJobId("");
       setJobInfo(null);
@@ -846,6 +872,14 @@ export default function App() {
             <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
               {JSON.stringify(jobInfo.attempts, null, 2)}
             </pre>
+
+            <button
+              onClick={() => loadCompare(jobId)}
+              disabled={busy}
+              style={{ padding: "8px 12px", marginTop: 10 }}
+            >
+              Compare Last Attempt
+            </button>
           </div>
         );
       }
@@ -875,6 +909,49 @@ export default function App() {
           </div>
 
           {jobView}
+
+          {(() => {
+            let compareBlock: any = null;
+
+            if (compareData) {
+              compareBlock = (
+                <div style={{ marginTop: 12 }}>
+                  <h4>Compare</h4>
+
+                  <div style={{ fontSize: 12, opacity: 0.8 }}>
+                    Attempt #{compareData.attempt.attemptNo} Response {compareData.attempt.responseStatus}
+                  </div>
+
+                  <h4 style={{ marginTop: 10 }}>Diff</h4>
+                  <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+                    {JSON.stringify(compareData.diff, null, 2)}
+                  </pre>
+
+                  <h4>Original Body</h4>
+                  <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+                    {compareData.original.body.raw}
+                  </pre>
+
+                  <h4>Replay Body</h4>
+                  <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+                    {compareData.replay.body.raw}
+                  </pre>
+
+                  <h4>Original Headers</h4>
+                  <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+                    {JSON.stringify(compareData.original.headers, null, 2)}
+                  </pre>
+
+                  <h4>Replay Headers</h4>
+                  <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+                    {JSON.stringify(compareData.replay.headers, null, 2)}
+                  </pre>
+                </div>
+              );
+            }
+
+            return compareBlock;
+          })()}
         </div>
       );
     }
