@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 
 type Inbox = {
   id: string;
@@ -41,6 +41,7 @@ export default function App() {
 
   const [name, setName] = useState("");
   const [inboxes, setInboxes] = useState<Inbox[]>([]);
+  const inboxesRef = useRef<Inbox[]>([]);
   const [events, setEvents] = useState<EventSummary[]>([]);
   const [eventDetail, setEventDetail] = useState<EventDetail | null>(null);
   const [activeInbox, setActiveInbox] = useState<Inbox | null>(null);
@@ -64,9 +65,12 @@ export default function App() {
     '[{"path":"n","value":999},{"path":"profile.apiKey","value":"demo"}]';
 
   // Replay Job state
-  const [destUrl, setDestUrl] = useState("https://httpbin.org/post");
-  const [jobId, setJobId] = useState("");
-  const [jobInfo, setJobInfo] = useState<any>(null);
+  const [replayDest, setReplayDest] = useState("https://postman-echo.com/post");
+  const [replayRetryMax, setReplayRetryMax] = useState("3");
+  const [jobs, setJobs] = useState<any[]>([]);
+  const [selectedJobId, setSelectedJobId] = useState("");
+  const [jobDetail, setJobDetail] = useState<any>(null);
+  const [jobAttempts, setJobAttempts] = useState<any[]>([]);
   const [compareData, setCompareData] = useState<any>(null);
 
   async function fetchWithTimeout(url: string, options: any, timeoutMs: number) {
@@ -98,7 +102,8 @@ export default function App() {
       const res = await fetchWithTimeout(API_BASE + "/api/inboxes", null, 8000);
       if (!res.ok) {
         setErr("Failed to load inboxes");
-        return;
+        setInboxes([]);
+        return [];
       }
 
       const data = await res.json();
@@ -108,8 +113,13 @@ export default function App() {
         list = data.inboxes as Inbox[];
       }
       setInboxes(list);
+      inboxesRef.current = list;
+      return list;
     } catch {
       setErr("Network error loading inboxes");
+      setInboxes([]);
+      inboxesRef.current = [];
+      return [];
     }
   }
 
@@ -154,8 +164,12 @@ export default function App() {
     setPreviewData(null);
     setCompareData(null);
 
-    setJobId("");
-    setJobInfo(null);
+    setReplayDest("https://postman-echo.com/post");
+    setReplayRetryMax("3");
+    setJobs([]);
+    setSelectedJobId("");
+    setJobDetail(null);
+    setJobAttempts([]);
 
     try {
       const res = await fetchWithTimeout(
@@ -179,6 +193,7 @@ export default function App() {
       setActiveInbox(inbox);
       setEvents(list);
       setView("events");
+      window.location.hash = "events/" + inbox.id;
     } catch {
       setErr("Network error loading events");
     } finally {
@@ -198,9 +213,12 @@ export default function App() {
     setHdrOverridesText("[]");
     setJsonOverridesText("[]");
 
-    setDestUrl("https://httpbin.org/post");
-    setJobId("");
-    setJobInfo(null);
+    setReplayDest("https://postman-echo.com/post");
+    setReplayRetryMax("3");
+    setJobs([]);
+    setSelectedJobId("");
+    setJobDetail(null);
+    setJobAttempts([]);
     setCompareData(null);
 
     try {
@@ -224,6 +242,11 @@ export default function App() {
 
       setEventDetail(detail);
       setView("event");
+      window.location.hash = "event/" + eventId;
+
+      if (detail) {
+        await loadReplayJobs(detail.id);
+      }
     } catch {
       setErr("Network error loading event detail");
     } finally {
@@ -347,44 +370,50 @@ export default function App() {
     }
   }
 
-  async function loadJob(id: string) {
+  async function loadReplayJobs(eventId: string) {
     setErr("");
 
     try {
       const res = await fetchWithTimeout(
-        API_BASE + "/api/replay-jobs/" + id,
+        API_BASE + "/api/events/" + eventId + "/replay-jobs",
         null,
         8000
       );
 
       if (!res.ok) {
-        setErr("Failed to load replay job");
+        setErr("Failed to load replay jobs");
         return;
       }
 
       const data = await res.json();
-      setJobInfo(data);
+      let jobsList: any[] = [];
+      if (data && data.jobs && Array.isArray(data.jobs)) {
+        jobsList = data.jobs;
+      }
+      setJobs(jobsList);
     } catch {
-      setErr("Network error loading replay job");
+      setErr("Network error loading replay jobs");
     }
   }
 
-  async function createJobFromEvent() {
+  async function createReplayJob(eventId: string) {
     setErr("");
     setBusy(true);
-    setJobInfo(null);
 
-    if (!eventDetail) {
-      setErr("No event selected");
-      setBusy(false);
-      return;
-    }
-
-    const dest = destUrl.trim();
+    const dest = replayDest.trim();
     if (dest.length === 0) {
       setErr("Destination URL is required");
       setBusy(false);
       return;
+    }
+
+    let retryMaxNum = 3;
+    const retryMaxText = replayRetryMax.trim();
+    if (retryMaxText.length > 0) {
+      const parsed = parseInt(retryMaxText, 10);
+      if (!isNaN(parsed) && parsed >= 1 && parsed <= 5) {
+        retryMaxNum = parsed;
+      }
     }
 
     const hdr = parseJsonInput(hdrOverridesText);
@@ -415,16 +444,15 @@ export default function App() {
 
     try {
       const res = await fetchWithTimeout(
-        API_BASE + "/api/replay-jobs",
+        API_BASE + "/api/events/" + eventId + "/replay-jobs",
         {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            eventId: eventDetail.id,
             destinationUrl: dest,
             headerOverrides: hdr,
             jsonOverrides: jsn,
-            retry: { maxAttempts: 3, baseDelayMs: 300 }
+            retryMax: retryMaxNum
           })
         },
         8000
@@ -433,48 +461,57 @@ export default function App() {
       if (!res.ok) {
         const t = await res.text();
         setErr("Create job failed: " + t);
+        setBusy(false);
         return;
       }
 
-      const data = await res.json();
-
-      if (data && data.job && typeof data.job.id === "string") {
-        setJobId(data.job.id);
-        await loadJob(data.job.id);
+      await loadReplayJobs(eventId);
+    } catch (e: any) {
+      let msg = "Network error creating replay job";
+      if (e && e.message) {
+        msg = msg + ": " + e.message;
       }
-    } catch {
-      setErr("Network error creating replay job");
+      setErr(msg);
     } finally {
       setBusy(false);
     }
   }
 
-  async function runJobNow() {
+  async function loadReplayJobDetail(jobId: string) {
     setErr("");
     setBusy(true);
 
-    if (jobId.length === 0) {
-      setErr("No replay job created yet");
-      setBusy(false);
-      return;
-    }
-
     try {
       const res = await fetchWithTimeout(
-        API_BASE + "/api/replay-jobs/" + jobId + "/run",
-        { method: "POST" },
-        20000
+        API_BASE + "/api/replay-jobs/" + jobId,
+        null,
+        8000
       );
 
       if (!res.ok) {
         const t = await res.text();
-        setErr("Run job failed: " + t);
+        setErr("Failed to load replay job detail: " + t);
+        setBusy(false);
         return;
       }
 
-      await loadJob(jobId);
-    } catch {
-      setErr("Network error running replay job");
+      const data = await res.json();
+      if (data && data.job) {
+        setJobDetail(data.job);
+        let attemptsList: any[] = [];
+        if (data.attempts && Array.isArray(data.attempts)) {
+          attemptsList = data.attempts;
+        }
+        setJobAttempts(attemptsList);
+      } else {
+        setErr("Invalid response: missing job data");
+      }
+    } catch (e: any) {
+      let msg = "Network error loading replay job detail";
+      if (e && e.message) {
+        msg = msg + ": " + e.message;
+      }
+      setErr(msg);
     } finally {
       setBusy(false);
     }
@@ -501,48 +538,58 @@ export default function App() {
     }
   }
 
-  function goBack() {
-    setErr("");
-    setCopyMsg("");
-
-    if (view === "event") {
-      setView("events");
-      setEventDetail(null);
-
-      setSafeOn(false);
-      setSafeData(null);
-
-      setPreviewData(null);
-      setCompareData(null);
-
-      setJobId("");
-      setJobInfo(null);
-
-      return;
-    }
-
-    if (view === "events") {
-      setView("inboxes");
-      setEvents([]);
-      setActiveInbox(null);
-
-      setSafeOn(false);
-      setSafeData(null);
-
-      setPreviewData(null);
-      setCompareData(null);
-
-      setJobId("");
-      setJobInfo(null);
-
-      return;
-    }
-
-    setView("inboxes");
-  }
 
   useEffect(() => {
-    loadInboxes();
+    async function init() {
+      const loadedInboxes = await loadInboxes();
+
+      const hash = window.location.hash.slice(1);
+      const parts = hash.split("/");
+
+      if (parts[0] === "events" && parts.length === 2) {
+        const inboxId = parts[1];
+        const inbox = loadedInboxes.find((ibx) => ibx.id === inboxId);
+        if (inbox) {
+          await openEvents(inbox);
+        }
+      } else if (parts[0] === "event" && parts.length === 2) {
+        const eventId = parts[1];
+        await openEvent(eventId);
+      } else if (hash === "inboxes" || hash === "") {
+        setView("inboxes");
+        window.location.hash = "inboxes";
+      }
+    }
+
+    init();
+
+    async function handleHashChange() {
+      const hash = window.location.hash.slice(1);
+      const parts = hash.split("/");
+
+      if (parts[0] === "events" && parts.length === 2) {
+        const inboxId = parts[1];
+        let inbox = inboxesRef.current.find((ibx) => ibx.id === inboxId);
+        if (!inbox) {
+          const loaded = await loadInboxes();
+          inbox = loaded.find((ibx) => ibx.id === inboxId);
+        }
+        if (inbox) {
+          await openEvents(inbox);
+        }
+      } else if (parts[0] === "event" && parts.length === 2) {
+        const eventId = parts[1];
+        await openEvent(eventId);
+      } else if (hash === "inboxes" || hash === "") {
+        setView("inboxes");
+      }
+    }
+
+    window.addEventListener("hashchange", handleHashChange);
+
+    return () => {
+      window.removeEventListener("hashchange", handleHashChange);
+    };
   }, []);
 
   let errorBlock: any = null;
@@ -554,14 +601,6 @@ export default function App() {
     );
   }
 
-  let backBlock: any = null;
-  if (view !== "inboxes") {
-    backBlock = (
-      <button onClick={goBack} style={{ padding: "8px 12px", marginBottom: 12 }}>
-        Back
-      </button>
-    );
-  }
 
   let mainBlock: any = <div />;
 
@@ -854,32 +893,151 @@ export default function App() {
     let replayBlock: any = null;
 
     if (!usingSafe) {
-      let jobView: any = null;
+      let jobsListBlock: any = null;
+      if (jobs.length > 0) {
+        const jobCards: any[] = [];
+        for (const job of jobs) {
+          const isSelected = selectedJobId === job.id;
+          const showDetails = isSelected && jobDetail;
 
-      if (jobInfo && jobInfo.job) {
-        jobView = (
-          <div style={{ marginTop: 10 }}>
-            <div style={{ fontSize: 13, opacity: 0.85 }}>
-              Status: {jobInfo.job.status}
+          let jobDetailsBlock: any = null;
+          if (showDetails) {
+            let attemptsBlock: any = null;
+            if (jobAttempts.length > 0) {
+              const attemptItems: any[] = [];
+              for (const att of jobAttempts) {
+                attemptItems.push(
+                  <div key={att.id} style={{ border: "1px solid #d59b9bff", borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>Attempt #{att.attemptNo}</div>
+                    <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+                      Status: {att.responseStatus} | OK: {(() => {
+                        if (att.ok) return "Yes";
+                        return "No";
+                      })()} | Started: {new Date(att.startedAt).toLocaleString()}
+                    </div>
+                    {att.errorMessage && att.errorMessage.length > 0 && (
+                      <div style={{ fontSize: 12, color: "#d00", marginTop: 4 }}>Error: {att.errorMessage}</div>
+                    )}
+                    {att.responseSnippet && att.responseSnippet.length > 0 && (
+                      <pre style={{ fontSize: 11, padding: 8, background: "#f5f5f5", borderRadius: 4, marginTop: 6, overflowX: "auto" }}>
+                        {att.responseSnippet}
+                      </pre>
+                    )}
+                  </div>
+                );
+              }
+              attemptsBlock = (
+                <div style={{ marginTop: 12 }}>
+                  <h4>Attempts ({jobAttempts.length})</h4>
+                  {attemptItems}
+                </div>
+              );
+            }
+
+            jobDetailsBlock = (
+              <div style={{ marginTop: 12, border: "1px solid #ccc", borderRadius: 8, padding: 12, position: "relative" }}>
+                <button
+                  onClick={() => {
+                    setSelectedJobId("");
+                    setJobDetail(null);
+                    setJobAttempts([]);
+                  }}
+                  style={{
+                    position: "absolute",
+                    top: 8,
+                    right: 8,
+                    background: "#464158ff",
+                    border: "1px solid #ddd",
+                    borderRadius: "50%",
+                    width: 24,
+                    height: 24,
+                    cursor: "pointer",
+                    fontSize: 16,
+                    lineHeight: 1,
+                    padding: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center"
+                  }}
+                >
+                  ×
+                </button>
+                <h4 style={{ marginTop: 0, marginBottom: 8 }}>Job Details</h4>
+                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>ID: {jobDetail.id}</div>
+                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>Status: {jobDetail.status}</div>
+                <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 4 }}>Destination: {jobDetail.destinationUrl}</div>
+                {attemptsBlock}
+                <button
+                  onClick={() => loadCompare(selectedJobId)}
+                  disabled={busy}
+                  style={{ padding: "8px 12px", marginTop: 10 }}
+                >
+                  Compare Last Attempt
+                </button>
+              </div>
+            );
+          }
+
+          jobCards.push(
+            <div key={job.id} style={{ marginBottom: 8 }}>
+              <div style={{ border: "1px solid #ddd", borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>Job {job.id.slice(0, 12)}...</div>
+                <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+                  Status: {job.status} | Retry Max: {job.retryMax} | Created: {new Date(job.createdAt).toLocaleString()}
+                </div>
+                {!showDetails && (
+                  <button
+                    onClick={async () => {
+                      setSelectedJobId(job.id);
+                      await loadReplayJobDetail(job.id);
+                    }}
+                    disabled={busy}
+                    style={{ padding: "6px 10px", marginTop: 8, fontSize: 12 }}
+                  >
+                    Open Job
+                  </button>
+                )}
+              </div>
+              {jobDetailsBlock}
             </div>
+          );
+        }
+        jobsListBlock = (
+          <div style={{ marginTop: 12 }}>
+            <h4>Jobs ({jobs.length})</h4>
+            {jobCards}
+          </div>
+        );
+      }
 
-            <div style={{ fontSize: 12, opacity: 0.7 }}>
-              Job ID: {jobInfo.job.id}
+      let compareBlock: any = null;
+      if (compareData) {
+        compareBlock = (
+          <div style={{ marginTop: 12 }}>
+            <h4>Compare</h4>
+            <div style={{ fontSize: 12, opacity: 0.8 }}>
+              Attempt #{compareData.attempt.attemptNo} Response {compareData.attempt.responseStatus}
             </div>
-
-            <h4 style={{ marginTop: 10 }}>Attempts</h4>
-
+            <h4 style={{ marginTop: 10 }}>Diff</h4>
             <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
-              {JSON.stringify(jobInfo.attempts, null, 2)}
+              {JSON.stringify(compareData.diff, null, 2)}
             </pre>
-
-            <button
-              onClick={() => loadCompare(jobId)}
-              disabled={busy}
-              style={{ padding: "8px 12px", marginTop: 10 }}
-            >
-              Compare Last Attempt
-            </button>
+            <h4>Original Body</h4>
+            <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+              {compareData.original.body.raw}
+            </pre>
+            <h4>Replay Body</h4>
+            <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+              {compareData.replay.body.raw}
+            </pre>
+            <h4>Original Headers</h4>
+            <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+              {JSON.stringify(compareData.original.headers, null, 2)}
+            </pre>
+            <h4>Replay Headers</h4>
+            <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+              {JSON.stringify(compareData.replay.headers, null, 2)}
+            </pre>
           </div>
         );
       }
@@ -891,67 +1049,37 @@ export default function App() {
           <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>
             Destination URL
           </div>
-
           <input
-            value={destUrl}
-            onChange={(e) => setDestUrl(e.target.value)}
+            value={replayDest}
+            onChange={(e) => setReplayDest(e.target.value)}
             style={{ padding: 10, width: "100%", borderRadius: 8, border: "1px solid #ddd" }}
           />
 
-          <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button onClick={createJobFromEvent} disabled={busy} style={{ padding: "8px 12px" }}>
-              Create Replay Job
-            </button>
+          <div style={{ fontSize: 12, opacity: 0.7, marginTop: 10, marginBottom: 6 }}>
+            Retry Max (1-5)
+          </div>
+          <input
+            value={replayRetryMax}
+            onChange={(e) => setReplayRetryMax(e.target.value)}
+            style={{ padding: 10, width: "100%", borderRadius: 8, border: "1px solid #ddd" }}
+          />
 
-            <button onClick={runJobNow} disabled={busy} style={{ padding: "8px 12px" }}>
-              Run Job
+          <div style={{ marginTop: 10 }}>
+            <button
+              onClick={() => {
+                if (eventDetail) {
+                  createReplayJob(eventDetail.id);
+                }
+              }}
+              disabled={busy}
+              style={{ padding: "8px 12px" }}
+            >
+              Create Replay Job
             </button>
           </div>
 
-          {jobView}
-
-          {(() => {
-            let compareBlock: any = null;
-
-            if (compareData) {
-              compareBlock = (
-                <div style={{ marginTop: 12 }}>
-                  <h4>Compare</h4>
-
-                  <div style={{ fontSize: 12, opacity: 0.8 }}>
-                    Attempt #{compareData.attempt.attemptNo} Response {compareData.attempt.responseStatus}
-                  </div>
-
-                  <h4 style={{ marginTop: 10 }}>Diff</h4>
-                  <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
-                    {JSON.stringify(compareData.diff, null, 2)}
-                  </pre>
-
-                  <h4>Original Body</h4>
-                  <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
-                    {compareData.original.body.raw}
-                  </pre>
-
-                  <h4>Replay Body</h4>
-                  <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
-                    {compareData.replay.body.raw}
-                  </pre>
-
-                  <h4>Original Headers</h4>
-                  <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
-                    {JSON.stringify(compareData.original.headers, null, 2)}
-                  </pre>
-
-                  <h4>Replay Headers</h4>
-                  <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
-                    {JSON.stringify(compareData.replay.headers, null, 2)}
-                  </pre>
-                </div>
-              );
-            }
-
-            return compareBlock;
-          })()}
+          {jobsListBlock}
+          {compareBlock}
         </div>
       );
     }
@@ -981,12 +1109,21 @@ export default function App() {
     );
   }
 
+  function goHome() {
+    setView("inboxes");
+    window.location.hash = "inboxes";
+  }
+
   return (
     <div style={{ fontFamily: "system-ui", padding: 24, maxWidth: 900, margin: "0 auto" }}>
-      <h1>Webhook Replay Studio</h1>
+      <h1
+        onClick={goHome}
+        style={{ cursor: "pointer", userSelect: "none" }}
+      >
+        Webhook Replay Studio
+      </h1>
       <p>Replay Jobs: create + run + attempts history</p>
 
-      {backBlock}
       {errorBlock}
       {mainBlock}
     </div>

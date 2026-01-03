@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { makeId } from "./utils/ids";
 import { inboundRoute } from "./routes/inboud";
 import { eventsRoute } from "./routes/events";
+import { replayJobsRoute } from "./routes/replayJobs";
 
 type Bindings = {
   DB: D1Database;
@@ -675,6 +676,7 @@ app.post("/api/events/:eventId/mutate-preview", async (c) => {
 
 app.route("/", inboundRoute);
 app.route("/", eventsRoute);
+app.route("/", replayJobsRoute);
 
 function sleepMs(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
