@@ -48,6 +48,19 @@ export default function App() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
+  // Safe Share state (from last chunk)
+  const [safeOn, setSafeOn] = useState(false);
+  const [safeData, setSafeData] = useState<any>(null);
+  const [copyMsg, setCopyMsg] = useState("");
+
+  // New: Mutations preview state
+  const [hdrOverridesText, setHdrOverridesText] = useState("[]");
+  const [jsonOverridesText, setJsonOverridesText] = useState("[]");
+  const [previewData, setPreviewData] = useState<any>(null);
+
+  const hdrExample = '[{"action":"set","name":"x-demo","value":"changed"},{"action":"remove","name":"authorization"}]';
+  const jsonExample = '[{"path":"n","value":999},{"path":"profile.apiKey","value":"demo"}]';
+
   async function fetchWithTimeout(url: string, options: any, timeoutMs: number) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -59,6 +72,14 @@ export default function App() {
       return await fetch(url, opts);
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  function parseJsonInput(text: string) {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
     }
   }
 
@@ -118,6 +139,12 @@ export default function App() {
     setErr("");
     setEventDetail(null);
 
+    setSafeOn(false);
+    setSafeData(null);
+    setCopyMsg("");
+
+    setPreviewData(null);
+
     try {
       const res = await fetchWithTimeout(
         API_BASE + "/api/inboxes/" + inbox.id + "/events",
@@ -151,6 +178,14 @@ export default function App() {
     setBusy(true);
     setErr("");
 
+    setSafeOn(false);
+    setSafeData(null);
+    setCopyMsg("");
+
+    setPreviewData(null);
+    setHdrOverridesText("[]");
+    setJsonOverridesText("[]");
+
     try {
       const res = await fetchWithTimeout(API_BASE + "/api/events/" + eventId, null, 8000);
 
@@ -175,12 +210,130 @@ export default function App() {
     }
   }
 
+  async function loadSafe(eventId: string) {
+    setBusy(true);
+    setErr("");
+    setCopyMsg("");
+
+    try {
+      const res = await fetchWithTimeout(API_BASE + "/api/events/" + eventId + "/safe", null, 8000);
+      if (!res.ok) {
+        setErr("Failed to load safe share view");
+        return;
+      }
+
+      const data = await res.json();
+      setSafeData(data);
+      setSafeOn(true);
+    } catch {
+      setErr("Network error loading safe share view");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyText(text: string) {
+    setCopyMsg("");
+
+    try {
+      if (!navigator) {
+        setCopyMsg("Copy not available");
+        return;
+      }
+
+      const clip: any = (navigator as any).clipboard;
+      if (!clip) {
+        setCopyMsg("Copy not available");
+        return;
+      }
+
+      if (typeof clip.writeText !== "function") {
+        setCopyMsg("Copy not available");
+        return;
+      }
+
+      await clip.writeText(text);
+      setCopyMsg("Copied");
+    } catch {
+      setCopyMsg("Copy failed");
+    }
+  }
+
+  async function runPreview() {
+    setErr("");
+    setBusy(true);
+    setPreviewData(null);
+
+    if (!eventDetail) {
+      setErr("No event selected");
+      setBusy(false);
+      return;
+    }
+
+    const hdr = parseJsonInput(hdrOverridesText);
+    if (hdr === null) {
+      setErr("Header overrides must be valid JSON");
+      setBusy(false);
+      return;
+    }
+
+    const jsn = parseJsonInput(jsonOverridesText);
+    if (jsn === null) {
+      setErr("JSON overrides must be valid JSON");
+      setBusy(false);
+      return;
+    }
+
+    if (!Array.isArray(hdr)) {
+      setErr("Header overrides must be a JSON array");
+      setBusy(false);
+      return;
+    }
+
+    if (!Array.isArray(jsn)) {
+      setErr("JSON overrides must be a JSON array");
+      setBusy(false);
+      return;
+    }
+
+    try {
+      const res = await fetchWithTimeout(
+        API_BASE + "/api/events/" + eventDetail.id + "/mutate-preview",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ headerOverrides: hdr, jsonOverrides: jsn })
+        },
+        8000
+      );
+
+      if (!res.ok) {
+        const t = await res.text();
+        setErr("Preview failed: " + t);
+        return;
+      }
+
+      const data = await res.json();
+      setPreviewData(data);
+    } catch {
+      setErr("Network error running preview");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function goBack() {
     setErr("");
+    setCopyMsg("");
 
     if (view === "event") {
       setView("events");
       setEventDetail(null);
+
+      setSafeOn(false);
+      setSafeData(null);
+
+      setPreviewData(null);
       return;
     }
 
@@ -188,6 +341,11 @@ export default function App() {
       setView("inboxes");
       setEvents([]);
       setActiveInbox(null);
+
+      setSafeOn(false);
+      setSafeData(null);
+
+      setPreviewData(null);
       return;
     }
 
@@ -319,25 +477,77 @@ export default function App() {
     let title = "Event Detail";
     if (eventDetail) title = eventDetail.method + " " + eventDetail.receivedAt;
 
+    let toolbar: any = null;
+
+    if (eventDetail) {
+      if (!safeOn) {
+        toolbar = (
+          <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+            <button onClick={() => loadSafe(eventDetail.id)} disabled={busy} style={{ padding: "8px 12px" }}>
+              Safe Share
+            </button>
+          </div>
+        );
+      } else {
+        toolbar = (
+          <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+            <button
+              onClick={() => {
+                setSafeOn(false);
+                setSafeData(null);
+                setCopyMsg("");
+              }}
+              style={{ padding: "8px 12px" }}
+            >
+              Exit Safe Share
+            </button>
+          </div>
+        );
+      }
+    }
+
+    let usingSafe = false;
+    let safeObj: any = null;
+
+    if (safeOn) {
+      if (safeData && safeData.safe) {
+        usingSafe = true;
+        safeObj = safeData.safe;
+      }
+    }
+
     let bodyBlock: any = (
       <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
         {"No body"}
       </pre>
     );
 
-    if (eventDetail) {
-      if (eventDetail.body && eventDetail.body.isJson) {
-        bodyBlock = (
-          <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
-            {JSON.stringify(eventDetail.body.json, null, 2)}
-          </pre>
-        );
-      } else {
-        bodyBlock = (
-          <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
-            {eventDetail.body.raw}
-          </pre>
-        );
+    if (usingSafe) {
+      let rawSafe = "";
+      if (safeObj && safeObj.body && typeof safeObj.body.raw === "string") {
+        rawSafe = safeObj.body.raw;
+      }
+
+      bodyBlock = (
+        <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+          {rawSafe}
+        </pre>
+      );
+    } else {
+      if (eventDetail) {
+        if (eventDetail.body && eventDetail.body.isJson) {
+          bodyBlock = (
+            <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+              {JSON.stringify(eventDetail.body.json, null, 2)}
+            </pre>
+          );
+        } else {
+          bodyBlock = (
+            <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+              {eventDetail.body.raw}
+            </pre>
+          );
+        }
       }
     }
 
@@ -347,11 +557,103 @@ export default function App() {
       </pre>
     );
 
-    if (eventDetail) {
+    if (usingSafe) {
+      let h = {};
+      if (safeObj && safeObj.headers) {
+        h = safeObj.headers;
+      }
+
       headersBlock = (
         <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
-          {JSON.stringify(eventDetail.headers, null, 2)}
+          {JSON.stringify(h, null, 2)}
         </pre>
+      );
+    } else {
+      if (eventDetail) {
+        headersBlock = (
+          <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+            {JSON.stringify(eventDetail.headers, null, 2)}
+          </pre>
+        );
+      }
+    }
+
+    let curlBlock: any = null;
+
+    if (usingSafe) {
+      if (safeObj && typeof safeObj.curl === "string") {
+        curlBlock = (
+          <div>
+            <h3>Sanitized cURL</h3>
+            <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+              {safeObj.curl}
+            </pre>
+            <button onClick={() => copyText(safeObj.curl)} style={{ padding: "8px 12px" }}>
+              Copy sanitized cURL
+            </button>
+            <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>{copyMsg}</div>
+          </div>
+        );
+      }
+    }
+
+    let mutationsBlock: any = null;
+
+    if (!usingSafe) {
+      let previewBlock = null;
+      if (previewData) {
+        previewBlock = (
+          <div style={{ marginTop: 14 }}>
+            <h4>Diff</h4>
+            <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+              {JSON.stringify(previewData.diff, null, 2)}
+            </pre>
+
+            <h4>Preview Headers</h4>
+            <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+              {JSON.stringify(previewData.preview.headers, null, 2)}
+            </pre>
+
+            <h4>Preview Body</h4>
+            <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+              {previewData.preview.body.raw}
+            </pre>
+          </div>
+        );
+      }
+
+      mutationsBlock = (
+        <div style={{ marginTop: 18 }}>
+          <h3>Mutations Preview</h3>
+
+          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+            Header overrides JSON example: <code>{hdrExample}</code>
+          </div>
+          <textarea
+            value={hdrOverridesText}
+            onChange={(e) => setHdrOverridesText(e.target.value)}
+            rows={4}
+            style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd" }}
+          />
+
+          <div style={{ fontSize: 12, opacity: 0.7, marginTop: 12, marginBottom: 8 }}>
+            JSON overrides JSON example: <code>{jsonExample}</code>
+          </div>
+          <textarea
+            value={jsonOverridesText}
+            onChange={(e) => setJsonOverridesText(e.target.value)}
+            rows={4}
+            style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd" }}
+          />
+
+          <div style={{ marginTop: 10 }}>
+            <button onClick={runPreview} disabled={busy} style={{ padding: "8px 12px" }}>
+              Preview Changes
+            </button>
+          </div>
+
+          {previewBlock}
+        </div>
       );
     }
 
@@ -361,6 +663,7 @@ export default function App() {
     mainBlock = (
       <div>
         <h2>{title}</h2>
+        {toolbar}
 
         <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 10 }}>
           {pathLine}
@@ -371,6 +674,9 @@ export default function App() {
 
         <h3>Headers</h3>
         {headersBlock}
+
+        {curlBlock}
+        {mutationsBlock}
       </div>
     );
   }
@@ -378,7 +684,7 @@ export default function App() {
   return (
     <div style={{ fontFamily: "system-ui", padding: 24, maxWidth: 900, margin: "0 auto" }}>
       <h1>Webhook Replay Studio</h1>
-      <p>Chunk 3 UI: Inboxes → Events → Event Detail</p>
+      <p>Mutations Preview: header overrides + JSON overrides + diff</p>
 
       {backBlock}
       {errorBlock}
