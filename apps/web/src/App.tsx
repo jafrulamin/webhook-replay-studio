@@ -48,18 +48,25 @@ export default function App() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // Safe Share state (from last chunk)
+  // Safe Share state
   const [safeOn, setSafeOn] = useState(false);
   const [safeData, setSafeData] = useState<any>(null);
   const [copyMsg, setCopyMsg] = useState("");
 
-  // New: Mutations preview state
+  // Mutations preview state
   const [hdrOverridesText, setHdrOverridesText] = useState("[]");
   const [jsonOverridesText, setJsonOverridesText] = useState("[]");
   const [previewData, setPreviewData] = useState<any>(null);
 
-  const hdrExample = '[{"action":"set","name":"x-demo","value":"changed"},{"action":"remove","name":"authorization"}]';
-  const jsonExample = '[{"path":"n","value":999},{"path":"profile.apiKey","value":"demo"}]';
+  const hdrExample =
+    '[{"action":"set","name":"x-demo","value":"changed"},{"action":"remove","name":"authorization"}]';
+  const jsonExample =
+    '[{"path":"n","value":999},{"path":"profile.apiKey","value":"demo"}]';
+
+  // Replay Job state
+  const [destUrl, setDestUrl] = useState("https://httpbin.org/post");
+  const [jobId, setJobId] = useState("");
+  const [jobInfo, setJobInfo] = useState<any>(null);
 
   async function fetchWithTimeout(url: string, options: any, timeoutMs: number) {
     const controller = new AbortController();
@@ -145,6 +152,9 @@ export default function App() {
 
     setPreviewData(null);
 
+    setJobId("");
+    setJobInfo(null);
+
     try {
       const res = await fetchWithTimeout(
         API_BASE + "/api/inboxes/" + inbox.id + "/events",
@@ -186,8 +196,16 @@ export default function App() {
     setHdrOverridesText("[]");
     setJsonOverridesText("[]");
 
+    setDestUrl("https://httpbin.org/post");
+    setJobId("");
+    setJobInfo(null);
+
     try {
-      const res = await fetchWithTimeout(API_BASE + "/api/events/" + eventId, null, 8000);
+      const res = await fetchWithTimeout(
+        API_BASE + "/api/events/" + eventId,
+        null,
+        8000
+      );
 
       if (!res.ok) {
         setErr("Failed to load event detail");
@@ -216,7 +234,11 @@ export default function App() {
     setCopyMsg("");
 
     try {
-      const res = await fetchWithTimeout(API_BASE + "/api/events/" + eventId + "/safe", null, 8000);
+      const res = await fetchWithTimeout(
+        API_BASE + "/api/events/" + eventId + "/safe",
+        null,
+        8000
+      );
       if (!res.ok) {
         setErr("Failed to load safe share view");
         return;
@@ -322,6 +344,139 @@ export default function App() {
     }
   }
 
+  async function loadJob(id: string) {
+    setErr("");
+
+    try {
+      const res = await fetchWithTimeout(
+        API_BASE + "/api/replay-jobs/" + id,
+        null,
+        8000
+      );
+
+      if (!res.ok) {
+        setErr("Failed to load replay job");
+        return;
+      }
+
+      const data = await res.json();
+      setJobInfo(data);
+    } catch {
+      setErr("Network error loading replay job");
+    }
+  }
+
+  async function createJobFromEvent() {
+    setErr("");
+    setBusy(true);
+    setJobInfo(null);
+
+    if (!eventDetail) {
+      setErr("No event selected");
+      setBusy(false);
+      return;
+    }
+
+    const dest = destUrl.trim();
+    if (dest.length === 0) {
+      setErr("Destination URL is required");
+      setBusy(false);
+      return;
+    }
+
+    const hdr = parseJsonInput(hdrOverridesText);
+    if (hdr === null) {
+      setErr("Header overrides must be valid JSON");
+      setBusy(false);
+      return;
+    }
+
+    const jsn = parseJsonInput(jsonOverridesText);
+    if (jsn === null) {
+      setErr("JSON overrides must be valid JSON");
+      setBusy(false);
+      return;
+    }
+
+    if (!Array.isArray(hdr)) {
+      setErr("Header overrides must be a JSON array");
+      setBusy(false);
+      return;
+    }
+
+    if (!Array.isArray(jsn)) {
+      setErr("JSON overrides must be a JSON array");
+      setBusy(false);
+      return;
+    }
+
+    try {
+      const res = await fetchWithTimeout(
+        API_BASE + "/api/replay-jobs",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            eventId: eventDetail.id,
+            destinationUrl: dest,
+            headerOverrides: hdr,
+            jsonOverrides: jsn,
+            retry: { maxAttempts: 3, baseDelayMs: 300 }
+          })
+        },
+        8000
+      );
+
+      if (!res.ok) {
+        const t = await res.text();
+        setErr("Create job failed: " + t);
+        return;
+      }
+
+      const data = await res.json();
+
+      if (data && data.job && typeof data.job.id === "string") {
+        setJobId(data.job.id);
+        await loadJob(data.job.id);
+      }
+    } catch {
+      setErr("Network error creating replay job");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runJobNow() {
+    setErr("");
+    setBusy(true);
+
+    if (jobId.length === 0) {
+      setErr("No replay job created yet");
+      setBusy(false);
+      return;
+    }
+
+    try {
+      const res = await fetchWithTimeout(
+        API_BASE + "/api/replay-jobs/" + jobId + "/run",
+        { method: "POST" },
+        20000
+      );
+
+      if (!res.ok) {
+        const t = await res.text();
+        setErr("Run job failed: " + t);
+        return;
+      }
+
+      await loadJob(jobId);
+    } catch {
+      setErr("Network error running replay job");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function goBack() {
     setErr("");
     setCopyMsg("");
@@ -334,6 +489,10 @@ export default function App() {
       setSafeData(null);
 
       setPreviewData(null);
+
+      setJobId("");
+      setJobInfo(null);
+
       return;
     }
 
@@ -346,6 +505,10 @@ export default function App() {
       setSafeData(null);
 
       setPreviewData(null);
+
+      setJobId("");
+      setJobInfo(null);
+
       return;
     }
 
@@ -483,7 +646,11 @@ export default function App() {
       if (!safeOn) {
         toolbar = (
           <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-            <button onClick={() => loadSafe(eventDetail.id)} disabled={busy} style={{ padding: "8px 12px" }}>
+            <button
+              onClick={() => loadSafe(eventDetail.id)}
+              disabled={busy}
+              style={{ padding: "8px 12px" }}
+            >
               Safe Share
             </button>
           </div>
@@ -601,6 +768,7 @@ export default function App() {
 
     if (!usingSafe) {
       let previewBlock = null;
+
       if (previewData) {
         previewBlock = (
           <div style={{ marginTop: 14 }}>
@@ -657,6 +825,60 @@ export default function App() {
       );
     }
 
+    let replayBlock: any = null;
+
+    if (!usingSafe) {
+      let jobView: any = null;
+
+      if (jobInfo && jobInfo.job) {
+        jobView = (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ fontSize: 13, opacity: 0.85 }}>
+              Status: {jobInfo.job.status}
+            </div>
+
+            <div style={{ fontSize: 12, opacity: 0.7 }}>
+              Job ID: {jobInfo.job.id}
+            </div>
+
+            <h4 style={{ marginTop: 10 }}>Attempts</h4>
+
+            <pre style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8, overflowX: "auto" }}>
+              {JSON.stringify(jobInfo.attempts, null, 2)}
+            </pre>
+          </div>
+        );
+      }
+
+      replayBlock = (
+        <div style={{ marginTop: 18 }}>
+          <h3>Replay Job</h3>
+
+          <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>
+            Destination URL
+          </div>
+
+          <input
+            value={destUrl}
+            onChange={(e) => setDestUrl(e.target.value)}
+            style={{ padding: 10, width: "100%", borderRadius: 8, border: "1px solid #ddd" }}
+          />
+
+          <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={createJobFromEvent} disabled={busy} style={{ padding: "8px 12px" }}>
+              Create Replay Job
+            </button>
+
+            <button onClick={runJobNow} disabled={busy} style={{ padding: "8px 12px" }}>
+              Run Job
+            </button>
+          </div>
+
+          {jobView}
+        </div>
+      );
+    }
+
     let pathLine = "";
     if (eventDetail) pathLine = eventDetail.path;
 
@@ -677,6 +899,7 @@ export default function App() {
 
         {curlBlock}
         {mutationsBlock}
+        {replayBlock}
       </div>
     );
   }
@@ -684,7 +907,7 @@ export default function App() {
   return (
     <div style={{ fontFamily: "system-ui", padding: 24, maxWidth: 900, margin: "0 auto" }}>
       <h1>Webhook Replay Studio</h1>
-      <p>Mutations Preview: header overrides + JSON overrides + diff</p>
+      <p>Replay Jobs: create + run + attempts history</p>
 
       {backBlock}
       {errorBlock}

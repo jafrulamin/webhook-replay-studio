@@ -676,6 +676,409 @@ app.post("/api/events/:eventId/mutate-preview", async (c) => {
 app.route("/", inboundRoute);
 app.route("/", eventsRoute);
 
+function sleepMs(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
+function parseJsonSafeText(text: string) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function isHttpUrl(url: string) {
+  try {
+    const u = new URL(url);
+    if (u.protocol === "http:") return true;
+    if (u.protocol === "https:") return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function cleanHeadersForFetch(h: any) {
+  const out: any = {};
+  const keys = Object.keys(h);
+
+  for (const k of keys) {
+    const n = String(k).toLowerCase();
+    if (n === "host") continue;
+    if (n === "content-length") continue;
+    if (n === "accept-encoding") continue;
+    out[n] = h[k];
+  }
+
+  return out;
+}
+
+function methodAllowsBody(method: string) {
+  const m = method.toUpperCase();
+  if (m === "GET") return false;
+  if (m === "HEAD") return false;
+  return true;
+}
+
+function snippet(text: string, maxLen: number) {
+  if (text.length <= maxLen) return text;
+  return text.slice(0, maxLen);
+}
+
+function computeDelay(baseDelayMs: number, attemptNo: number) {
+  // simple backoff: base * attemptNo
+  return baseDelayMs * attemptNo;
+}
+
+async function loadReplayJob(c: any, jobId: string) {
+  const jobRow = await c.env.DB.prepare(
+    "SELECT id, event_id, destination_url, header_overrides_json, json_overrides_json, max_attempts, base_delay_ms, status, created_at, last_run_at FROM replay_jobs WHERE id = ? LIMIT 1"
+  )
+    .bind(jobId)
+    .first();
+
+  if (!jobRow) return null;
+
+  const attemptsRes = await c.env.DB.prepare(
+    "SELECT id, job_id, attempt_no, started_at, finished_at, request_headers_json, request_body_text, response_status, response_snippet, error_message, success FROM replay_attempts WHERE job_id = ? ORDER BY attempt_no ASC"
+  )
+    .bind(jobId)
+    .all();
+
+  let attempts: any[] = [];
+  if (attemptsRes && attemptsRes.results) {
+    attempts = attemptsRes.results as any[];
+  }
+
+  return { jobRow: jobRow, attempts: attempts };
+}
+
+app.post("/api/replay-jobs", async (c) => {
+  let body: any = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+
+  let eventId = "";
+  if (body && typeof body.eventId === "string") {
+    eventId = body.eventId;
+  }
+
+  let destinationUrl = "";
+  if (body && typeof body.destinationUrl === "string") {
+    destinationUrl = body.destinationUrl;
+  }
+
+  if (eventId.length === 0) {
+    return c.json({ ok: false, error: "missing_event_id" }, 400);
+  }
+
+  if (destinationUrl.length === 0) {
+    return c.json({ ok: false, error: "missing_destination_url" }, 400);
+  }
+
+  if (!isHttpUrl(destinationUrl)) {
+    return c.json({ ok: false, error: "invalid_destination_url" }, 400);
+  }
+
+  let headerOverrides: any[] = [];
+  if (body && Array.isArray(body.headerOverrides)) {
+    headerOverrides = body.headerOverrides;
+  }
+
+  let jsonOverrides: any[] = [];
+  if (body && Array.isArray(body.jsonOverrides)) {
+    jsonOverrides = body.jsonOverrides;
+  }
+
+  let maxAttempts = 3;
+  if (body && body.retry && typeof body.retry.maxAttempts === "number") {
+    const n = Math.floor(body.retry.maxAttempts);
+    if (n >= 1 && n <= 5) maxAttempts = n;
+  }
+
+  let baseDelayMs = 500;
+  if (body && body.retry && typeof body.retry.baseDelayMs === "number") {
+    const n = Math.floor(body.retry.baseDelayMs);
+    if (n >= 0 && n <= 5000) baseDelayMs = n;
+  }
+
+  const evRow = await c.env.DB.prepare(
+    "SELECT id FROM events WHERE id = ? LIMIT 1"
+  )
+    .bind(eventId)
+    .first();
+
+  if (!evRow) {
+    return c.json({ ok: false, error: "event_not_found" }, 404);
+  }
+
+  const jobId = makeId("job");
+  const createdAt = Date.now();
+
+  await c.env.DB.prepare(
+    "INSERT INTO replay_jobs (id, event_id, destination_url, header_overrides_json, json_overrides_json, max_attempts, base_delay_ms, status, created_at, last_run_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+  )
+    .bind(
+      jobId,
+      eventId,
+      destinationUrl,
+      JSON.stringify(headerOverrides),
+      JSON.stringify(jsonOverrides),
+      maxAttempts,
+      baseDelayMs,
+      "pending",
+      createdAt,
+      0
+    )
+    .run();
+
+  return c.json(
+    {
+      job: {
+        id: jobId,
+        eventId: eventId,
+        destinationUrl: destinationUrl,
+        maxAttempts: maxAttempts,
+        baseDelayMs: baseDelayMs,
+        status: "pending",
+        createdAt: new Date(createdAt).toISOString()
+      }
+    },
+    201
+  );
+});
+
+app.get("/api/replay-jobs/:jobId", async (c) => {
+  const jobId = c.req.param("jobId");
+
+  const loaded = await loadReplayJob(c, jobId);
+  if (!loaded) {
+    return c.json({ ok: false, error: "job_not_found" }, 404);
+  }
+
+  const jobRow: any = loaded.jobRow;
+  const attempts: any[] = loaded.attempts;
+
+  const job = {
+    id: jobRow.id,
+    eventId: jobRow.event_id,
+    destinationUrl: jobRow.destination_url,
+    maxAttempts: jobRow.max_attempts,
+    baseDelayMs: jobRow.base_delay_ms,
+    status: jobRow.status,
+    createdAt: new Date(jobRow.created_at).toISOString(),
+    lastRunAt: (() => {
+      if (jobRow.last_run_at && jobRow.last_run_at > 0) {
+        return new Date(jobRow.last_run_at).toISOString();
+      }
+      return "";
+    })()
+  };
+
+  const outAttempts: any[] = [];
+  for (const a of attempts) {
+    outAttempts.push({
+      id: a.id,
+      attemptNo: a.attempt_no,
+      startedAt: new Date(a.started_at).toISOString(),
+      finishedAt: new Date(a.finished_at).toISOString(),
+      responseStatus: a.response_status,
+      responseSnippet: a.response_snippet,
+      errorMessage: a.error_message,
+      success: a.success === 1
+    });
+  }
+
+  return c.json({ job: job, attempts: outAttempts });
+});
+
+app.post("/api/replay-jobs/:jobId/run", async (c) => {
+  const jobId = c.req.param("jobId");
+
+  const loaded = await loadReplayJob(c, jobId);
+  if (!loaded) {
+    return c.json({ ok: false, error: "job_not_found" }, 404);
+  }
+
+  const jobRow: any = loaded.jobRow;
+
+  // clear previous attempts for simplicity
+  await c.env.DB.prepare("DELETE FROM replay_attempts WHERE job_id = ?").bind(jobId).run();
+
+  const now = Date.now();
+  await c.env.DB.prepare(
+    "UPDATE replay_jobs SET status = ?, last_run_at = ? WHERE id = ?"
+  )
+    .bind("running", now, jobId)
+    .run();
+
+  const eventId = String(jobRow.event_id);
+  const destUrl = String(jobRow.destination_url);
+  const maxAttempts = Number(jobRow.max_attempts);
+  const baseDelayMs = Number(jobRow.base_delay_ms);
+
+  const headerOverridesParsed = parseJsonSafeText(String(jobRow.header_overrides_json));
+  const jsonOverridesParsed = parseJsonSafeText(String(jobRow.json_overrides_json));
+
+  let headerOverrides: any[] = [];
+  if (Array.isArray(headerOverridesParsed)) headerOverrides = headerOverridesParsed;
+
+  let jsonOverrides: any[] = [];
+  if (Array.isArray(jsonOverridesParsed)) jsonOverrides = jsonOverridesParsed;
+
+  const ev = await c.env.DB.prepare(
+    "SELECT id, method, headers_json, content_type, body_text, body_json FROM events WHERE id = ? LIMIT 1"
+  )
+    .bind(eventId)
+    .first();
+
+  if (!ev) {
+    await c.env.DB.prepare("UPDATE replay_jobs SET status = ? WHERE id = ?").bind("failed", jobId).run();
+    return c.json({ ok: false, error: "event_not_found" }, 404);
+  }
+
+  let method = String((ev as any).method).toUpperCase();
+  if (method !== "POST" && method !== "PUT" && method !== "PATCH" && method !== "DELETE" && method !== "GET") {
+    method = "POST";
+  }
+
+  const headersParsed = parseJsonSafeText(String((ev as any).headers_json));
+  let baseHeaders: any = {};
+  if (headersParsed !== null) baseHeaders = headersParsed;
+
+  let finalHeaders = applyHeaderOverrides(baseHeaders, headerOverrides);
+  finalHeaders = cleanHeadersForFetch(finalHeaders);
+
+  let contentType = "";
+  if (typeof (ev as any).content_type === "string") {
+    contentType = (ev as any).content_type;
+  }
+  if (contentType.length > 0) {
+    if (!Object.prototype.hasOwnProperty.call(finalHeaders, "content-type")) {
+      finalHeaders["content-type"] = contentType;
+    }
+  }
+
+  let bodyText = "";
+  let bodyJsonText = "";
+  if (typeof (ev as any).body_text === "string") bodyText = (ev as any).body_text;
+  if (typeof (ev as any).body_json === "string") bodyJsonText = (ev as any).body_json;
+
+  let sendText = bodyText;
+
+  let parsedBody = null;
+  if (bodyJsonText.length > 0) {
+    parsedBody = parseJsonSafeText(bodyJsonText);
+  }
+  if (parsedBody !== null) {
+    let mutated = parsedBody;
+    for (const ov of jsonOverrides) {
+      if (!ov) continue;
+      if (typeof ov.path !== "string") continue;
+      mutated = setPathValue(mutated, ov.path, ov.value);
+    }
+    sendText = JSON.stringify(mutated);
+  }
+
+  let finalStatus = "failed";
+  let lastError = "";
+
+  let attemptNo = 1;
+  while (attemptNo <= maxAttempts) {
+    const startedAt = Date.now();
+
+    let respStatus = 0;
+    let respSnippet = "";
+    let errMsg = "";
+    let ok = false;
+
+    try {
+      const opts: any = { method: method, headers: finalHeaders };
+
+      if (methodAllowsBody(method)) {
+        opts.body = sendText;
+      }
+
+      const resp = await fetch(destUrl, opts);
+      respStatus = resp.status;
+
+      let txt = "";
+      try {
+        txt = await resp.text();
+      } catch {
+        txt = "";
+      }
+
+      respSnippet = snippet(txt, 800);
+      if (respStatus >= 200 && respStatus <= 299) {
+        ok = true;
+      }
+    } catch (e: any) {
+      let msg = "request_failed";
+      if (e && e.message) {
+        msg = e.message;
+      }
+      errMsg = String(msg);
+      lastError = errMsg;
+    }
+
+    const finishedAt = Date.now();
+
+    const attemptId = makeId("att");
+
+    await c.env.DB.prepare(
+      "INSERT INTO replay_attempts (id, job_id, attempt_no, started_at, finished_at, request_headers_json, request_body_text, response_status, response_snippet, error_message, success) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+      .bind(
+        attemptId,
+        jobId,
+        attemptNo,
+        startedAt,
+        finishedAt,
+        JSON.stringify(finalHeaders),
+        sendText,
+        respStatus,
+        respSnippet,
+        errMsg,
+        (() => {
+          if (ok) return 1;
+          return 0;
+        })()
+      )
+      .run();
+
+    if (ok) {
+      finalStatus = "succeeded";
+      lastError = "";
+      break;
+    }
+
+    if (attemptNo < maxAttempts) {
+      const d = computeDelay(baseDelayMs, attemptNo);
+      if (d > 0) {
+        await sleepMs(d);
+      }
+    }
+
+    attemptNo = attemptNo + 1;
+  }
+
+  await c.env.DB.prepare(
+    "UPDATE replay_jobs SET status = ? WHERE id = ?"
+  )
+    .bind(finalStatus, jobId)
+    .run();
+
+  const result = await loadReplayJob(c, jobId);
+  if (!result) {
+    return c.json({ ok: false, error: "job_not_found" }, 404);
+  }
+
+  return c.json({ ok: true, status: finalStatus, lastError: lastError });
+});
 
 export default app;
