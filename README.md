@@ -67,7 +67,7 @@ webhook-replay-studio/
 │   │   │   ├── index.ts        # Main API entry point
 │   │   │   ├── routes/         # API route handlers
 │   │   │   │   ├── inboxes.ts  # Inbox management
-│   │   │   │   ├── inboud.ts   # Webhook receiver
+│   │   │   │   ├── inbound.ts   # Webhook receiver
 │   │   │   │   ├── events.ts   # Event queries
 │   │   │   │   └── replayJobs.ts # Replay job API
 │   │   │   └── utils/
