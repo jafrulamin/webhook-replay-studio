@@ -6,7 +6,7 @@ compatibility_date = "2025-12-29"
 [[d1_databases]]
 binding = "DB"
 database_name = "wrs_db"
-database_id = "your-database-id"
+database_id = "dab57f51-059a-4949-b9ee-26f8f8ed4abe"
 
 [vars]
 PUBLIC_API_BASE = "http://127.0.0.1:8787"
