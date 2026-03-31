@@ -26,7 +26,7 @@ function applyCors(c: any) {
 
   c.header("Access-Control-Allow-Origin", origin);
   c.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
-  c.header("Access-Control-Allow-Headers", "content-type");
+  c.header("Access-Control-Allow-Headers", "content-type,x-owner-token");
 }
 
 app.options("/api/*", (c) => {
@@ -73,13 +73,15 @@ app.post("/api/inboxes", async (c) => {
     }
   }
 
+  const ownerToken = c.req.header("x-owner-token") || "";
+
   const id = makeId("ibx");
   const createdAt = Date.now();
 
   await c.env.DB.prepare(
-    "INSERT INTO inboxes (id, name, created_at) VALUES (?, ?, ?)"
+    "INSERT INTO inboxes (id, name, created_at, owner_token) VALUES (?, ?, ?, ?)"
   )
-    .bind(id, name, createdAt)
+    .bind(id, name, createdAt, ownerToken)
     .run();
 
   const base = getBaseUrl(c);
@@ -98,9 +100,13 @@ app.post("/api/inboxes", async (c) => {
 });
 
 app.get("/api/inboxes", async (c) => {
+  const ownerToken = c.req.header("x-owner-token") || "";
+
   const result = await c.env.DB.prepare(
-    "SELECT id, name, created_at FROM inboxes ORDER BY created_at DESC LIMIT 50"
-  ).all();
+    "SELECT id, name, created_at FROM inboxes WHERE owner_token = ? ORDER BY created_at DESC LIMIT 50"
+  )
+    .bind(ownerToken)
+    .all();
 
   let rows: any[] = [];
   if (result && result.results) {
@@ -120,6 +126,26 @@ app.get("/api/inboxes", async (c) => {
   }
 
   return c.json({ inboxes: inboxes });
+});
+
+app.delete("/api/inboxes/:inboxId", async (c) => {
+  const inboxId = c.req.param("inboxId");
+  const ownerToken = c.req.header("x-owner-token") || "";
+
+  const inbox = await c.env.DB.prepare(
+    "SELECT id FROM inboxes WHERE id = ? AND owner_token = ? LIMIT 1"
+  )
+    .bind(inboxId, ownerToken)
+    .first();
+
+  if (!inbox) {
+    return c.json({ ok: false, error: "inbox_not_found" }, 404);
+  }
+
+  await c.env.DB.prepare("DELETE FROM events WHERE inbox_id = ?").bind(inboxId).run();
+  await c.env.DB.prepare("DELETE FROM inboxes WHERE id = ?").bind(inboxId).run();
+
+  return c.json({ ok: true });
 });
 
 function safeJsonParse(text: string) {
