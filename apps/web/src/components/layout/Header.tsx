@@ -4,9 +4,15 @@ import { Button } from "@/components/ui/button";
 import { Moon, Sun, RefreshCw } from "lucide-react";
 import { useTheme } from "@/hooks/useTheme";
 import { Breadcrumbs } from "./Breadcrumbs";
+import { useQueryClient } from "@tanstack/react-query";
 
 export function Header() {
   const { theme, toggleTheme } = useTheme();
+  const queryClient = useQueryClient();
+
+  const handleRefresh = () => {
+    queryClient.invalidateQueries();
+  };
 
   let themeTitle = "Switch to light mode";
   if (theme === "light") {
@@ -33,6 +39,7 @@ export function Header() {
           size="icon"
           className="h-8 w-8"
           title="Refresh"
+          onClick={handleRefresh}
         >
           <RefreshCw className="h-4 w-4" />
         </Button>

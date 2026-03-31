@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(wc -l \"c:\\\\Users\\\\aminj\\\\Desktop\\\\My-Projects\\\\webhook-replay-studio\\\\apps\\\\api\\\\src\\\\routes\"*.ts)"
-    ]
-  }
-}

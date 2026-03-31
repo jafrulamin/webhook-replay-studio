@@ -6,7 +6,6 @@ import { AppLayout } from "@/components/layout";
 import { InboxListPage } from "@/pages/InboxListPage";
 import { InboxDetailPage } from "@/pages/InboxDetailPage";
 import { EventDetailPage } from "@/pages/EventDetailPage";
-import { SettingsPage } from "@/pages/SettingsPage";
 import NotFound from "@/pages/NotFound";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 
@@ -31,8 +30,7 @@ const App = () => {
                 <Route path="/" element={<InboxListPage />} />
                 <Route path="/inbox/:inboxId" element={<InboxDetailPage />} />
                 <Route path="/inbox/:inboxId/event/:eventId" element={<EventDetailPage />} />
-                <Route path="/settings" element={<SettingsPage />} />
-                <Route path="*" element={<NotFound />} />
+<Route path="*" element={<NotFound />} />
               </Routes>
             </AppLayout>
           </BrowserRouter>
